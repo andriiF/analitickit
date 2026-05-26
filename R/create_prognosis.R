@@ -143,3 +143,61 @@ create_prognosis <- function(data,
     )
   )
 }
+
+
+prepare_prophet_history <- function(data,
+                                    store_nbr = NULL,
+                                    family = NULL,
+                                    period = c("day", "week", "month")) {
+  period <- match.arg(period)
+
+  train_cols <- sales_columns("train")
+
+  date_col <- train_cols[["date"]]
+  store_col <- train_cols[["store_nbr"]]
+  family_col <- train_cols[["family"]]
+  sales_col <- train_cols[["sales"]]
+
+  train <- data$train
+
+  if (!is.null(store_nbr)) {
+    train <- train |>
+      dplyr::filter(.data[[store_col]] %in% .env$store_nbr)
+  }
+
+  if (!is.null(family)) {
+    train <- train |>
+      dplyr::filter(.data[[family_col]] %in% .env$family)
+  }
+
+  if (period == "day") {
+    period_dates <- train[[date_col]]
+  } else {
+    period_dates <- lubridate::floor_date(train[[date_col]], unit = period)
+  }
+
+  history <- train |>
+    dplyr::mutate(.period_date = period_dates) |>
+    dplyr::group_by(.data$.period_date) |>
+    dplyr::summarise(
+      y = sum(.data[[sales_col]], na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::transmute(
+      ds = as.Date(.data$.period_date),
+      y = as.numeric(.data$y)
+    ) |>
+    dplyr::arrange(.data$ds)
+
+  history
+}
+prognosis_frequency <- function(period = c("day", "week", "month")) {
+  period <- match.arg(period)
+
+  switch(
+    period,
+    day = "day",
+    week = "week",
+    month = "month"
+  )
+}
