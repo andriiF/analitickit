@@ -1,0 +1,9 @@
+clean_sales_ts          Clean sales time series data
+compute_sales_metrics   Compute sales business metrics
+create_management_summary
+                        Create management sales summary
+create_prognosis        Create sales prognosis using Prophet
+load_sales_data         Load sales data
+plot_sales_trends       Plot sales trends
+sales_ts_logic          Run sales time series analysis logic
+validate_sales_ts       Validate sales time series data

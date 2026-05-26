@@ -9,18 +9,15 @@ Authors@R: c(
       role = c("aut", "cre")
     )
   )
-Imports:
-    dplyr,
-    readr,
-    tibble,
-    tidyr,
-    lubridate,
-    ggplot2
-Suggests:
-    testthat (>= 3.0.0),
-    prophet
+Imports: dplyr, readr, tibble, tidyr, lubridate, ggplot2
+Suggests: testthat (>= 3.0.0), prophet
 Description: A toolkit for validating, summarising, and analysing sales data.
 License: MIT + file LICENSE
 Encoding: UTF-8
-LazyData: true
 Config/roxygen2/version: 8.0.0
+NeedsCompilation: no
+Packaged: 2026-05-26 17:54:03 UTC; root
+Author: Andrii Fedorenko [aut, cre]
+Maintainer: Andrii Fedorenko <a.fedorenko@student.uw.edu.pl>
+Depends: R (>= 4.1.0)
+Built: R 4.5.2; ; 2026-05-26 17:54:03 UTC; unix
