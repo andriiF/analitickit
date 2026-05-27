@@ -238,11 +238,18 @@ calculate_moving_average <- function(x, window) {
   )
 }
 calculate_avg_days_between_peaks <- function(dates, is_peak) {
-  peak_dates <- dates[is_peak %in% TRUE]
+  peak_days <- as.integer(as.Date(dates[is_peak %in% TRUE]))
 
-  if (length(peak_dates) < 2) {
+  if (length(peak_days) < 2L) {
     return(NA_real_)
   }
 
-  mean(diff(as.Date(peak_dates)))
+  gaps <- diff(peak_days)
+
+  if (length(gaps) == 0L) {
+    return(NA_real_)
+  }
+
+  # Integer day gaps avoid lubridate duration/difftime in dplyr summarise.
+  as.double(mean(gaps))
 }

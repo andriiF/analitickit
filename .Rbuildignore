@@ -4,3 +4,4 @@
 ^\.claude$
 ^analitickit\.Rcheck$
 ^analitickit_.*\.tar\.gz$
+^reports$

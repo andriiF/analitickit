@@ -1,0 +1,512 @@
+---
+title: "Raport trendów sprzedaży i skuteczności promocji"
+author: "analitickit"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    df_print: paged
+params:
+  data_path: "data"
+  forecast_store: 1
+  forecast_family: "AUTOMOTIVE"
+  forecast_horizon: 30
+  forecast_period: "day"
+  segment_city: null
+  segment_store_type: null
+  segment_start_date: null
+  segment_end_date: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 5
+)
+
+pkg_root <- if (file.exists("DESCRIPTION")) {
+  "."
+} else if (file.exists("../DESCRIPTION")) {
+  ".."
+} else {
+  NULL
+}
+
+if (!is.null(pkg_root) && requireNamespace("devtools", quietly = TRUE)) {
+  devtools::load_all(pkg_root, quiet = TRUE)
+} else {
+  library(analitickit)
+}
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(tidyr)
+
+has_prophet <- requireNamespace("prophet", quietly = TRUE)
+
+format_number <- function(x, digits = 2) {
+  format(round(x, digits), big.mark = " ", scientific = FALSE, trim = TRUE)
+}
+
+promotion_effectiveness <- function(train) {
+  by_promo <- train |>
+    mutate(is_promoted = .data$onpromotion > 0) |>
+    group_by(.data$store_nbr, .data$family, is_promoted) |>
+    summarise(
+      observations = n(),
+      average_sales = mean(.data$sales, na.rm = TRUE),
+      total_sales = sum(.data$sales, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  without_promo <- by_promo |>
+    filter(!.data$is_promoted) |>
+    dplyr::select(
+      .data$store_nbr,
+      .data$family,
+      avg_without = .data$average_sales,
+      obs_without = .data$observations
+    )
+
+  with_promo <- by_promo |>
+    filter(.data$is_promoted) |>
+    dplyr::select(
+      .data$store_nbr,
+      .data$family,
+      avg_with = .data$average_sales,
+      obs_with = .data$observations
+    )
+
+  without_promo |>
+    full_join(with_promo, by = c("store_nbr", "family")) |>
+    mutate(
+      uplift_avg_sales = dplyr::if_else(
+        !is.na(.data$avg_without) &
+          .data$avg_without > 0 &
+          !is.na(.data$avg_with),
+        (.data$avg_with - .data$avg_without) / .data$avg_without * 100,
+        NA_real_
+      )
+    )
+}
+
+plot_prognosis <- function(prognosis) {
+  history <- prognosis$history
+  forecast <- prognosis$forecast
+
+  ggplot(forecast, aes(x = .data$ds)) +
+    geom_ribbon(
+      aes(ymin = .data$yhat_lower, ymax = .data$yhat_upper),
+      fill = "#4C97FF",
+      alpha = 0.2
+    ) +
+    geom_line(aes(y = .data$yhat), color = "#1F4E99", linewidth = 0.8) +
+    geom_line(
+      data = history,
+      aes(x = .data$ds, y = .data$y),
+      color = "#333333",
+      linewidth = 0.6
+    ) +
+    labs(
+      x = "Data",
+      y = "Sprzedaż",
+      title = "Prognoza sprzedaży (Prophet)",
+      subtitle = paste(
+        "Sklep:", prognosis$filters$store_nbr %||% "wszystkie",
+        "| Kategoria:", prognosis$filters$family %||% "wszystkie"
+      )
+    ) +
+    theme_minimal(base_size = 12)
+}
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+```
+
+# Wprowadzenie
+
+Niniejszy raport analizuje szeregi czasowe sprzedaży detalicznej z wykorzystaniem pakietu **analitickit**. Obejmuje:
+
+- walidację i czyszczenie danych,
+- trendy sprzedaży produktów,
+- skuteczność promocji (`onpromotion`),
+- porównanie sklepów i kategorii produktów,
+- prognozowanie sprzedaży (Prophet),
+- opcjonalną analizę segmentu (miasto, typ sklepu, zakres dat).
+
+**Źródło danych:** `r params$data_path` (pliki `train.csv`, `stores.csv`, `holidays_events.csv`).
+
+---
+
+# 1. Wczytanie i walidacja danych
+
+```{r load-data}
+sales_data <- load_sales_data(params$data_path)
+validation_before <- validate_sales_ts(sales_data)
+```
+
+```{r validation-before}
+validation_ok <- validation_before$passed
+```
+
+Stan walidacji przed czyszczeniem: **`r if (validation_ok) "OK" else "Wykryto problemy"`**.
+
+```{r validation-details, eval=!validation_ok}
+if (!validation_ok) {
+  knitr::kable(
+    data.frame(
+      obszar = c(
+        "Struktura",
+        "Kolumny",
+        "Braki",
+        "Duplikaty",
+        "Zakres wartości",
+        "Spójność sklepów",
+        "Częstotliwość"
+      ),
+      status = c(
+        validation_before$structure$passed,
+        validation_before$columns$passed,
+        validation_before$missing_values$passed,
+        validation_before$duplicates$passed,
+        validation_before$value_ranges$passed,
+        validation_before$store_consistency$passed,
+        validation_before$frequency$passed
+      )
+    )
+  )
+}
+```
+
+---
+
+# 2. Czyszczenie danych
+
+```{r clean-data}
+clean_data <- clean_sales_ts(
+  sales_data,
+  handle_duplicates = "aggregate",
+  fill_missing_dates = TRUE,
+  fill_sales = 0,
+  fill_onpromotion = 0,
+  sort = TRUE
+)
+
+validation_after <- validate_sales_ts(clean_data)
+```
+
+Po czyszczeniu: **`r nrow(clean_data$train)`** wierszy w `train`, okres od **`r min(clean_data$train$date)`** do **`r max(clean_data$train$date)`**.
+
+---
+
+# 3. Podsumowanie zarządcze
+
+```{r management-summary}
+mgmt <- create_management_summary(clean_data, period = "month")
+```
+
+## 3.1 Przegląd
+
+```{r overview-table}
+knitr::kable(mgmt$overview)
+```
+
+## 3.2 Najlepszy i najsłabszy sklep
+
+```{r store-ranking}
+knitr::kable(dplyr::bind_rows(
+  best = mgmt$best_store,
+  worst = mgmt$worst_store
+))
+```
+
+## 3.3 Kategorie — wzrost i spadek
+
+```{r category-insights}
+knitr::kable(dplyr::bind_rows(
+  fastest_growing = mgmt$fastest_growing_category,
+  largest_declining = mgmt$largest_declining_category
+))
+```
+
+## 3.4 Promocje — podsumowanie globalne
+
+```{r promo-summary}
+knitr::kable(mgmt$promotion_summary)
+```
+
+---
+
+# 4. Trendy sprzedaży
+
+## 4.1 Sprzedaż ogółem (miesięcznie)
+
+```{r plot-overall, fig.cap="Trend sprzedaży — cały zbiór"}
+plot_sales_trends(
+  clean_data,
+  aggregate_period = "month",
+  add_moving_average = TRUE,
+  moving_average_window = 3
+)
+```
+
+## 4.2 Porównanie sklepów
+
+```{r plot-stores, fig.cap="Trend sprzedaży wg sklepu"}
+plot_sales_trends(
+  clean_data,
+  group_var = "store_nbr",
+  aggregate_period = "month",
+  add_moving_average = FALSE
+)
+```
+
+## 4.3 Porównanie kategorii produktów
+
+```{r plot-families, fig.cap="Trend sprzedaży wg kategorii (family)"}
+plot_sales_trends(
+  clean_data,
+  group_var = "family",
+  aggregate_period = "month",
+  add_moving_average = FALSE
+)
+```
+
+---
+
+# 5. Porównanie sklepów i kategorii (metryki)
+
+```{r metrics-stores}
+metrics_stores <- compute_sales_metrics(
+  clean_data,
+  group_vars = "store_nbr",
+  moving_average_window = 30
+) |>
+  arrange(desc(.data$total_sales))
+
+metrics_families <- compute_sales_metrics(
+  clean_data,
+  group_vars = "family",
+  moving_average_window = 30
+) |>
+  arrange(desc(.data$total_sales))
+
+metrics_store_family <- compute_sales_metrics(
+  clean_data,
+  group_vars = c("store_nbr", "family"),
+  moving_average_window = 30
+) |>
+  arrange(desc(.data$total_sales))
+```
+
+## 5.1 Top 10 sklepów
+
+```{r top-stores-table}
+knitr::kable(
+  metrics_stores |>
+    dplyr::select(
+      store_nbr, total_sales, average_sales, percent_growth,
+      promotion_share, promoted_sales_share
+    ) |>
+    head(10)
+)
+```
+
+```{r top-stores-chart, fig.cap="Top 10 sklepów — sprzedaż całkowita"}
+metrics_stores |>
+  head(10) |>
+  ggplot(aes(x = reorder(as.factor(.data$store_nbr), .data$total_sales), y = .data$total_sales)) +
+  geom_col(fill = "#2E86AB") +
+  coord_flip() +
+  labs(x = "Sklep", y = "Sprzedaż całkowita", title = "Top 10 sklepów") +
+  theme_minimal()
+```
+
+## 5.2 Top 10 kategorii produktów
+
+```{r top-families-table}
+knitr::kable(
+  metrics_families |>
+    dplyr::select(
+      family, total_sales, average_sales, percent_growth,
+      promotion_share, promoted_sales_share
+    ) |>
+    head(10)
+)
+```
+
+```{r top-families-chart, fig.cap="Top 10 kategorii — sprzedaż całkowita"}
+metrics_families |>
+  head(10) |>
+  ggplot(aes(x = reorder(.data$family, .data$total_sales), y = .data$total_sales)) +
+  geom_col(fill = "#A23B72") +
+  coord_flip() +
+  labs(x = "Kategoria", y = "Sprzedaż całkowita", title = "Top 10 kategorii") +
+  theme_minimal()
+```
+
+## 5.3 Wzrost procentowy — sklepy vs kategorie
+
+```{r growth-comparison, fig.cap="Wzrost procentowy (pierwszy vs ostatni okres)"}
+bind_rows(
+  metrics_stores |>
+    head(8) |>
+    transmute(label = paste0("Sklep ", .data$store_nbr), percent_growth),
+  metrics_families |>
+    head(8) |>
+    transmute(label = .data$family, percent_growth)
+) |>
+  ggplot(aes(x = reorder(.data$label, .data$percent_growth), y = .data$percent_growth)) +
+  geom_col(aes(fill = .data$percent_growth >= 0)) +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "#28A745", "FALSE" = "#DC3545"), guide = "none") +
+  labs(x = NULL, y = "Wzrost (%)", title = "Wzrost sprzedaży — wybrane sklepy i kategorie") +
+  theme_minimal()
+```
+
+---
+
+# 6. Skuteczność promocji
+
+Analiza porównuje średnią sprzedaż w dniach z promocją (`onpromotion > 0`) i bez promocji.
+
+## 6.1 Efekt promocji — poziom globalny
+
+```{r promo-global}
+promo_global <- clean_data$train |>
+  mutate(is_promoted = .data$onpromotion > 0) |>
+  group_by(is_promoted) |>
+  summarise(
+    observations = n(),
+    average_sales = mean(.data$sales, na.rm = TRUE),
+    total_sales = sum(.data$sales, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    is_promoted = ifelse(.data$is_promoted, "Z promocją", "Bez promocji")
+  )
+
+knitr::kable(promo_global)
+```
+
+```{r promo-global-chart, fig.cap="Średnia sprzedaż: dni z promocją vs bez"}
+ggplot(promo_global, aes(x = .data$is_promoted, y = .data$average_sales, fill = .data$is_promoted)) +
+  geom_col(width = 0.6) +
+  scale_fill_manual(values = c("Z promocją" = "#F18F01", "Bez promocji" = "#6C757D")) +
+  labs(x = NULL, y = "Średnia sprzedaż", title = "Skuteczność promocji — średnia dzienna") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## 6.2 Uplift promocji wg sklepu i kategorii (Top 15)
+
+```{r promo-uplift}
+promo_uplift <- promotion_effectiveness(clean_data$train) |>
+  filter(is.finite(.data$uplift_avg_sales)) |>
+  arrange(desc(.data$uplift_avg_sales)) |>
+  head(15) |>
+  mutate(
+    segment = paste0("Sklep ", .data$store_nbr, " / ", .data$family)
+  )
+
+knitr::kable(
+  promo_uplift |>
+    dplyr::select(segment, uplift_avg_sales, avg_with, avg_without)
+)
+```
+
+```{r promo-uplift-chart, fig.cap="Top 15 segmentów wg uplifu średniej sprzedaży w dni promocyjnych"}
+ggplot(promo_uplift, aes(x = reorder(.data$segment, .data$uplift_avg_sales), y = .data$uplift_avg_sales)) +
+  geom_col(fill = "#F18F01") +
+  coord_flip() +
+  labs(x = NULL, y = "Uplift średniej sprzedaży (%)", title = "Najwyższy uplift promocji") +
+  theme_minimal()
+```
+
+---
+
+# 7. Prognozowanie sprzedaży
+
+```{r prognosis, eval=has_prophet}
+prognosis <- create_prognosis(
+  clean_data,
+  store_nbr = params$forecast_store,
+  family = params$forecast_family,
+  horizon = params$forecast_horizon,
+  period = params$forecast_period,
+  include_history = TRUE
+)
+```
+
+```{r prognosis-check, eval=!has_prophet}
+cat("Pakiet `prophet` nie jest zainstalowany — sekcja prognozy została pominięta.")
+```
+
+```{r prognosis-plot, fig.cap="Prognoza Prophet z przedziałem ufności", eval=has_prophet}
+plot_prognosis(prognosis)
+```
+
+```{r prognosis-table, eval=has_prophet}
+knitr::kable(
+  prognosis$forecast |>
+    filter(.data$ds > max(prognosis$history$ds)) |>
+    dplyr::select(ds, yhat, yhat_lower, yhat_upper) |>
+    head(10)
+)
+```
+
+Parametry prognozy: sklep **`r params$forecast_store`**, kategoria **`r params$forecast_family`**, horyzont **`r params$forecast_horizon`**, okres **`r params$forecast_period`**.
+
+---
+
+# 8. Analiza segmentu (opcjonalna)
+
+```{r segment, eval=!is.null(params$segment_city) || !is.null(params$segment_store_type) || !is.null(params$segment_start_date)}
+segment_result <- sales_ts_logic(
+  clean_data,
+  city = params$segment_city,
+  store_type = params$segment_store_type,
+  start_date = params$segment_start_date,
+  end_date = params$segment_end_date,
+  group_vars = c("store_nbr", "family"),
+  plot_group_var = "family",
+  aggregate_period = "month",
+  add_moving_average = TRUE,
+  run_metrics = TRUE,
+  run_plot = TRUE
+)
+```
+
+```{r segment-metrics, eval=!is.null(params$segment_city) || !is.null(params$segment_store_type) || !is.null(params$segment_start_date)}
+knitr::kable(segment_result$metrics |> head(10))
+```
+
+```{r segment-plot, eval=!is.null(params$segment_city) || !is.null(params$segment_store_type) || !is.null(params$segment_start_date), fig.cap="Trend w wybranym segmencie"}
+segment_result$plot
+```
+
+```{r segment-skip, eval=is.null(params$segment_city) && is.null(params$segment_store_type) && is.null(params$segment_start_date)}
+cat("Ustaw parametry segment_city, segment_store_type lub segment_start_date w YAML, aby włączyć analizę segmentu.")
+```
+
+---
+
+# 9. Wnioski
+
+Na podstawie analizy pakietem **analitickit**:
+
+1. **Trendy** — wykresy miesięczne pokazują sezonowość i różnice między sklepami oraz kategoriami.
+2. **Sklepy i kategorie** — rankingi `total_sales` i `percent_growth` wskazują liderów i obszary wymagające uwagi.
+3. **Promocje** — porównanie dni z/bez promocji oraz uplift per sklep×kategoria ocenia skuteczność akcji promocyjnych.
+4. **Prognoza** — model Prophet (`create_prognosis`) szacuje przyszłą sprzedaż dla wybranego sklepu i kategorii.
+5. **Segmentacja** — funkcja `sales_ts_logic` umożliwia filtrowanie po mieście, typie sklepu i zakresie dat.
+
+---
+
+*Raport wygenerowany automatycznie przez `analitickit`.*

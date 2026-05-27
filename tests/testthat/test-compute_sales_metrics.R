@@ -79,6 +79,31 @@ test_that("compute_sales_metrics computes peak metrics", {
   expect_true(is.na(result$avg_days_between_peaks))
 })
 
+test_that("avg_days_between_peaks returns double across grouped peaks", {
+  sales_data <- list(
+    train = tibble::tibble(
+      id = 1:10,
+      date = as.Date(c(
+        "2013-01-01", "2013-01-02", "2013-01-03", "2013-01-04", "2013-01-05",
+        "2013-01-01", "2013-01-02", "2013-01-03", "2013-01-04", "2013-01-05"
+      )),
+      store_nbr = rep(1L, 10),
+      family = rep(c("AUTOMOTIVE", "BABY CARE"), each = 5),
+      sales = c(1, 5, 1, 5, 1, 10, 20, 10, 20, 10),
+      onpromotion = 0L
+    )
+  )
+
+  result <- compute_sales_metrics(
+    sales_data,
+    group_vars = c("store_nbr", "family")
+  )
+
+  expect_type(result$avg_days_between_peaks, "double")
+  expect_equal(result$peak_count, c(2L, 2L))
+  expect_equal(result$avg_days_between_peaks, c(2, 2))
+})
+
 
 test_that("compute_sales_metrics computes moving average metrics", {
   sales_data <- make_metrics_sales_data()
