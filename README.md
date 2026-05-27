@@ -7,7 +7,13 @@ PLiki:
 
 Lokalizacja plików: "data"
 
-WORKFLOW:
+Pełny workflow (jeden skrypt):
+
+```r
+source("workflow.R")
+```
+
+WORKFLOW (krok po kroku):
 sales_data <- load_sales_data("data/")
 
 validation_before <- validate_sales_ts(sales_data)
